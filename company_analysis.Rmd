@@ -1,0 +1,891 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+PRELIM DATA CHECK
+```{r}
+# Load libraries
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(skimr)
+library(psych)
+library(Hmisc)
+library(corrplot)
+library(naniar)
+library(GGally)
+library(janitor)
+
+# Read in data set
+df <- read_csv("company_data.csv")
+
+# Check data set
+head(df)
+
+# Check missing values
+df %>% gg_miss_var()
+
+# Summary of basic descriptives of numeric data
+df %>% psych::describe()
+
+```
+
+1. DATA CLEANING
+
+SELECT CROSS-SECTIONAL SAMPLE (2021)
+```{r}
+# Filter observations for year 2022 and save into new data frame df_2022
+df %>% filter(fyear == 2021) -> df_2021
+
+# Prelim check for new data frame
+df_2021 %>% gg_miss_var()
+df_2021 %>% psych::describe()
+```
+
+HANDLE NA VALUES
+```{r}
+# Check columns that have NA values
+names(which(colSums(is.na(df_2021)) > 0))
+
+# Create new variables to indicate whether company reports each type of expenses
+df_2021 %>%
+  mutate(report_ad_expense = if_else(!is.na(xad), 1, 0),
+         report_rd_expense = if_else(!is.na(xrd), 1, 0))-> df_2021
+
+# Create new variables to indicate whether company reports any of the remaining info
+df_2021 %>%
+  mutate(report_income = if_else(!is.na(ni), 1, 0),
+         report_sales = if_else(!is.na(sale), 1, 0))-> df_2021
+
+# Create new variables to indicate whether company reports any of the additional chosen variables
+df_2021 %>%
+  mutate(report_goodwill = if_else(!is.na(gdwl), 1, 0),
+         report_mkt_value = if_else(!is.na(mkvalt), 1, 0))-> df_2021
+
+# Delete observation where TIC code is missing
+df_2021 %>%
+  filter(!is.na(tic)) -> df_2021
+```
+
+SELECT BY COMPANY EMPLOYEE SIZE
+```{r}
+# Filter and keep only companies with over 2,000 employees
+df_2021 %>%
+  filter(emp >= 2.00) -> df_2021
+
+```
+
+RENAME & DELETE VARIABLES
+```{r}
+# Rename necessary variables
+df_2021 %>%
+  rename(
+    year = fyear,
+    company = conm,
+    price_adj_factor = ajex,
+    assets = at,
+    equity = ceq,
+    common_shares = csho,
+    employees = emp,
+    goodwill = gdwl,
+    net_income = ni,
+    net_sales = sale,
+    ad_expenses = xad,
+    op_expenses = xopr,
+    rd_expenses = xrd,
+    other_expenses = xsga,
+    market_value = mkvalt,
+    closing_price = prcc_f
+  ) -> df_2021
+
+# Delete unnecessary variables
+df_2021 %>%
+  select(-indfmt, -consol, -popsrc, -datafmt, -curcd, -costat, -gvkey, -datadate) -> df_2021
+
+```
+
+RECODE VARIABLES
+```{r}
+# Create new variable representing the company industry (using SIC ranges)
+df_2021 %>%
+  mutate(
+    sic = as.numeric(sic),
+    industry = case_when(
+      sic >= 0 & sic <= 999 ~ "Agriculture, Forestry and Fishing",
+      sic >= 1000 & sic <= 1499 ~ "Mining",
+      sic >= 1500 & sic <= 1799 ~ "Construction",
+      sic >= 2000 & sic <= 3999 ~ "Manufacturing",
+      sic >= 4000 & sic <= 4999 ~ "Transportation, Communications, Electric",
+      sic >= 5000 & sic <= 5199 ~ "Wholesale",
+      sic >= 5200 & sic <= 5999 ~ "Retail",
+      sic >= 6000 & sic <= 6799 ~ "Finance, Insurance, Real Estate",
+      sic >= 7000 & sic <= 7999 ~ "Services",
+      sic >= 9100 & sic <= 9999 ~ "Public Administration")) -> df_2021
+
+```
+
+
+CREATE NEW ADVERTISING MEASURES
+```{r}
+# Create new variable representing strategic emphasis
+df_2021 %>%
+  mutate(strategic_emphasis = ((ad_expenses - rd_expenses) / assets)) -> df_2021
+
+## Create a new binary variable indicating whether strategic_emphasis is greater than 0
+df_2021 %>%
+  mutate(strategic_emphasis_binary = if_else(strategic_emphasis >= 0, 1, 0)) -> df_2021
+
+# Create new variable representing Tobin's Q
+df_2021 %>%
+  mutate(tobins_q = ((assets + (common_shares * closing_price) - equity) / assets)) -> df_2021
+
+# Create new variable representing ROA
+df_2021 %>%
+  mutate(roa = net_income / assets) -> df_2021
+
+# Create new variable representing R&D intensity
+df_2021 %>%
+  mutate(rd_intentisy = rd_expenses / net_sales) -> df_2021
+
+# Create new variable representing advertising intensity
+df_2021 %>%
+  mutate(ad_intensity = ad_expenses / net_sales) -> df_2021
+
+```
+
+SEE AD, R&D EXPENSES OUT OF TOTAL EXPENSES
+```{r}
+# Create new variables for advertising and R&D expenses out of total expenses
+df_2021 %>%
+  mutate(
+    total_exp = ad_expenses + rd_expenses + op_expenses + other_expenses,
+    ad_exp_pct = (ad_expenses / total_exp) * 100,
+    rd_exp_pct = (rd_expenses / total_exp) * 100) -> df_2021
+
+```
+
+COMBINE AD/R&D EXPENDITURE AND STRATEGIC EMPHASIS (TO HANDLE NULL VALUES)
+```{r}
+# Create new variable indicating whether the company has reported ad/R&D expenses
+# and reported strategic emphasis
+df_2021 %>%
+  mutate(
+    report_expense_emphasis = 
+      if_else(report_ad_expense == 1 & report_rd_expense == 1 & !is.na(strategic_emphasis), 1, 0)
+  ) -> df_2021
+
+```
+
+
+2. EDA
+
+A. UNIVARIATE ANALYSIS
+
+
+
+NEW ADVERTISING MEASURES
+```{r}
+# Strategic emphasis
+df_2021 %>% 
+  tabyl(strategic_emphasis_binary) %>%
+  adorn_pct_formatting(digits = 2) %>%
+  adorn_totals()
+
+
+# Tobin's Q
+## Check for null values, summary stats
+sum(is.na(df_2021$tobins_q))
+df_2021$tobins_q %>% psych::describe()
+
+## Check for number of Tobin's Q values under 1
+df_2021 %>%
+  filter(tobins_q < 1) %>%
+  summarise(
+    under_one = n())
+
+## Boxplot with outliers
+df_2021 %>% 
+  ggplot() + geom_boxplot(aes(tobins_q), outlier.colour = "red", outlier.shape = 1) +
+  theme_classic() +
+  theme(axis.text.y = element_blank()) +
+  labs(
+    title = "Tobin's Q Distribution Across Companies",
+    x = "Tobin's Q")
+
+
+# ROA
+## Check for null values, summary stats
+sum(is.na(df_2021$roa))
+df_2021$roa %>% psych::describe()
+
+
+# Advertising, R&D intensity
+## Check for null values, summary stats
+sum(is.na(df_2021$ad_intensity))
+df_2021$ad_intensity %>% psych::describe()
+
+sum(is.na(df_2021$rd_intentisy))
+df_2021$rd_intentisy %>% psych::describe()
+
+## Grouped histograms
+df_2021 %>%
+  select(
+    ad_intensity,
+    rd_intentisy) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot() + geom_histogram(aes(value)) + facet_wrap(variable~., scales = "free") +
+  theme_classic() +
+  labs(
+    title = "Ad Intensity vs. R&D Intensity Across Companies",
+    x = "Intensity",
+    y = "Count")
+
+
+```
+
+OTHER COMPANY MEASURES
+```{r}
+# Advertising, R&D expenses
+## Check for null values, summary stats
+sum(is.na(df_2021$ad_expenses))
+df_2021$ad_expenses %>% psych::describe()
+
+sum(is.na(df_2021$rd_expenses))
+df_2021$rd_expenses %>% psych::describe()
+
+## Grouped histograms
+df_2021 %>%
+  select(
+    ad_expenses,
+    rd_expenses) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot() + geom_histogram(aes(value)) + facet_wrap(variable~., scales = "free") +
+  theme_classic() +
+  labs(
+    title = "Ad vs. R&D Expenditure Across Companies",
+    x = "Expenditure (Millions)",
+    y = "Number of Companies")
+
+
+# Employees
+## Check for null values, summary stats
+sum(is.na(df_2021$employees))
+df_2021$employees %>% psych::describe()
+
+## Histogram
+df_2021 %>% 
+  ggplot() + geom_histogram(aes(employees)) +
+  theme_classic() +
+  theme(axis.text.y = element_blank()) +
+  labs(
+    title = "Number of Employees Across Companies",
+    x = "Employees")
+
+
+# Goodwill
+## Check for null values, summary stats
+sum(is.na(df_2021$goodwill))
+df_2021$goodwill %>% psych::describe()
+
+## Boxplot
+df_2021 %>% 
+  ggplot() + geom_boxplot(aes(goodwill), outlier.colour = "red", outlier.shape = 1) +
+  theme_classic() +
+  theme(axis.text.y = element_blank()) +
+  labs(
+    title = "Goodwill Distribution Across Companies",
+    x = "Goodwill (Millions)")
+```
+
+INDUSTRIES (BY SIC CODE)
+```{r}
+# Check for null values
+sum(is.na(df_2021$industry))
+
+# See frequencies
+df_2021 %>% 
+  tabyl(industry) %>%
+  adorn_pct_formatting(digits = 2) %>% # Percent formatting
+  adorn_totals()
+
+# Bar charts by industry type
+df_2021 %>%
+  tabyl(industry) %>%
+  drop_na() %>%
+  arrange(n) %>%
+  ggplot() + geom_col(aes(y = n, x = reorder(industry, n))) + coord_flip() +
+  labs(
+    title = "Company Distribution by Industry",
+    x = "Industry",
+    y = "Number of Companies")
+```
+
+BASIC DESCRIPTIVES TABLE (BY INDUSTRY)
+```{r}
+# Values: mean, median, std dev
+# Variables: 
+## strategic_emphasis (mean, std dev)
+## ad_intensity
+## rd_intensity
+## tobin's q
+## roa
+## goodwill
+## net_sales
+
+df_2021 %>%
+  group_by(industry) %>%
+  drop_na() %>%
+  summarise(mean_emphasis = mean(strategic_emphasis),
+            mean_ad_int = mean(ad_intensity),
+            mean_rd_int = mean(rd_intentisy),
+            med_tobin = median(tobins_q),
+            dev_tobin = sd(tobins_q),
+            mean_roa = mean(roa),
+            med_goodwill = median(goodwill),
+            dev_goodwill = sd(goodwill)) -> sum_table
+
+# Reformat table
+colnames(sum_table) <- c("Industry", 
+                         "Emphasis (Mean)",
+                         "Ad Intensity (Mean)",
+                         "R&D Intensity (Mean)",
+                         "Tobin's Q (Median)",
+                         "Tobin's Q (Std. Dev.)",
+                         "ROA (Mean)",
+                         "Goodwill (Median)",
+                         "Goodwill (Std. Dev.)")
+formattable(sum_table)
+
+
+```
+
+
+
+B. BIVARIATE ANALYSIS
+- Scatterplots
+- Correlational graphs
+- Histograms
+- Tables
+- Etc.
+
+
+PRELIM CORRELATIONAL MATRIX CHECK
+```{r}
+# Plot correlational matrix for relevant variables
+df_2021 %>%
+  select(
+    assets,
+    equity,
+    goodwill,
+    net_income,
+    net_sales,
+    ad_expenses,
+    rd_expenses,
+    market_value,
+    tobins_q,
+    roa,
+    ad_intensity,
+    # rd_intentisy
+  ) %>%
+  as.matrix %>% 
+  rcorr() -> data.corr
+
+corrplot(data.corr$r, method = "shade", order = "alphabet", type = "lower", addCoef.col = TRUE, tl.srt = 45, tl.pos = "ld")
+```
+
+
+ADVERTISING INTENSITY - AS DV
+```{r}
+# Advertising intensity as DV (group by industry)
+## IV - Market value 
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = market_value, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Market Value (Millions USD)",
+    y = "Advertising Intensity")
+
+
+## IV - Assets
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = assets, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Assets (Millions USD)",
+    y = "Advertising Intensity")
+
+
+## IV - Equity
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = equity, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Equity (Millions USD)",
+    y = "Advertising Intensity")
+
+
+## IV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = net_income, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Net Income (Millions USD)",
+    y = "Advertising Intensity")
+
+
+## IV - Goodwill
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = goodwill, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Goodwill (Millions USD)",
+    y = "Advertising Intensity")
+
+
+## IV - Common shares
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = common_shares, y = ad_intensity, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Shares (Millions USD)",
+    y = "Advertising Intensity")
+```
+
+ADVERTISING INTENSITY - AS IV
+```{r}
+# Advertising intensity as IV (group by industry)
+## DV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_intensity, y = net_sales, color = industry)) + 
+  stat_smooth(aes(x = ad_expenses, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Advertising Intensity",
+    y = "Sales (Millions USD)")
+
+
+## DV - Goodwill
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_intensity, y = goodwill, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Advertising Intensity",
+    y = "Goodwill (Millions USD)")
+
+
+## DV - Market value
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_intensity, y = market_value, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Advertising Intensity",
+    y = "Market Value (Millions USD)")
+
+```
+
+ROA
+```{r}
+# ROA as DV (group by industry)
+## IV - Advertising expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_expenses, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_expenses, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "R&D Expenditure (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - R&D expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_expenses, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_expenses, y = roa), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "R&D Expenditure (Millions USD)",
+    y = "Return on Assets")
+
+
+## IV - Assets
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = assets, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Assets (Millions USD)",
+    y = "Return on Assets")
+
+
+## IV - Equity
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = equity, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Equity (Millions USD)",
+    y = "Return on Assets")
+
+
+## IV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = net_income, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Net Income (Millions USD)",
+    y = "Return on Assets")
+
+
+## IV - Goodwill
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = goodwill, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Goodwill (Millions USD)",
+    y = "Return on Assets")
+
+
+## IV - Market value
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = market_value, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  labs(
+    x = "Market Value (Millions USD)",
+    y = "Return on Assets")
+
+```
+
+TOBIN'S Q
+```{r}
+# Tobin's Q as DV (group by industry)
+## IV - Advertising expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_expenses, y = tobins_q, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_expenses, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "Advertising Expenses (Millions USD)",
+    y = "Tobin's Q")
+
+
+## IV - R&D expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_expenses, y = tobins_q, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_expenses, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "R&D Expenses (Millions USD)",
+    y = "Tobin's Q")
+
+
+## IV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = net_income, y = tobins_q, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = net_income, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "Net Income (Millions USD)",
+    y = "Tobin's Q")
+  
+
+## IV - Goodwill
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = goodwill, y = tobins_q, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = goodwill, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "Goodwill (Millions USD)",
+    y = "Tobin's Q")
+  
+  
+## IV - Employees
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = employees, y = tobins_q, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = employees, y = tobins_q), method = "lm", se = FALSE, linewidth = 0.5) +
+  labs(
+    x = "Number of Employees",
+    y = "Tobin's Q")
+  
+
+```
+
+SALES
+```{r}
+# Sales as DV (group by industry)
+## IV - Advertising expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_expenses, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_expenses, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Expenses (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - R&D expenses
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_expenses, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_expenses, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "R&D Expenses (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - Advertising intensity
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_intensity, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_intensity, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Intensity",
+    y = "Sales (Millions USD)")
+
+
+## IV - Assets
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = assets, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = assets, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Assets (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = net_income, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = net_income, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Net Income (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - Goodwill
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = goodwill, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = goodwill, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Goodwill (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+## IV - Market value
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = market_value, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = market_value, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Market Value (Millions USD)",
+    y = "Sales (Millions USD)")
+
+```
+
+STRATEGIC EMPHASIS - CREATE TABLE
+```{r}
+# Install and load in formattable
+install.packages("formattable")
+library(formattable)
+
+# Make table representing strategic emphasis category count for each industry
+df_2021 %>%
+  drop_na() %>%
+  tabyl(industry, strategic_emphasis_binary) %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting(digits = 1) %>%
+  adorn_ns(position = "front") -> table_test
+
+# Save table as data frame and reformat
+table_2 <- as.data.frame.matrix(table_test)
+colnames(table_2) <- c("Industry", "R&D Emphasis", "Marketing Emphasis", "Total")
+formattable(table_2)
+```
+
+CORRELATIONAL PLOTS CATEGORIZED BY STRATEGIC EMPHASIS
+```{r}
+# Employee against sales, grouped by industry and
+# coded by strategic emphasis
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = employees, y = net_sales, color = strategic_emphasis_binary)) +
+  facet_wrap(industry~., scales = "free") +
+  labs(
+    x = "Employee Number",
+    y = "Sales (Millions USD)")
+
+
+# Assets against sales, grouped by industry and
+# coded by strategic emphasis
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = assets, y = net_sales, color = strategic_emphasis_binary)) +
+  facet_wrap(industry~., scales = "free") +
+  labs(
+    x = "Assets",
+    y = "Sales (Millions USD)")
+
+
+# Goodwill against sales, grouped by industry and
+# coded by strategic emphasis
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = goodwill, y = net_sales, color = strategic_emphasis_binary)) +
+  facet_wrap(industry~., scales = "free") +
+  labs(
+    x = "Goodwill (Millions USD)",
+    y = "Sales (Millions USD)")
+
+
+# Sales against market value, grouped by industry and
+# coded by strategic emphasis
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = net_sales, y = market_value, color = strategic_emphasis_binary)) +
+  facet_wrap(industry~., scales = "free") +
+  labs(
+    x = "Sales (Millions USD)",
+    y = "Market Value (Millions USD)")
+
+
+# Advertising expenses against ROA, grouped by industry and
+# coded by strategic emphasis
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_expenses, y = roa, color = strategic_emphasis_binary)) +
+  facet_wrap(industry~., scales = "free") +
+  labs(
+    x = "Advertising Expenses (Millions USD)",
+    y = "Return on Assets")
+
+
+```
+
+
+AD EXPENDITURE PERCENTAGES
+```{r}
+# Ad expenditure percentage as IV (group by industry)
+## DV - Market value
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_exp_pct, y = market_value, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_exp_pct, y = market_value), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Expenditure (Out of Total Expenditure)",
+    y = "Market Value (Millions USD)")
+
+
+## DV - Sales
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_exp_pct, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_exp_pct, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Expenditure (Out of Total Expenditure)",
+    y = "Sales (Millions USD)")
+
+
+## DV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_exp_pct, y = net_income, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_exp_pct, y = net_income), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Expenditure (Out of Total Expenditure)",
+    y = "Income (Millions USD)")
+
+
+## DV - ROA
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = ad_exp_pct, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = ad_exp_pct, y = roa), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "Advertising Expenditure (Out of Total Expenditure)",
+    y = "Return on Assets")
+
+```
+
+R&D EXPENDITURE PERCENTAGES
+```{r}
+# R&D expenditure percentage as IV (group by industry)
+## DV - Market value
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_exp_pct, y = market_value, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_exp_pct, y = market_value), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "R&D Expenditure (Out of Total Expenditure)",
+    y = "Market Value (Millions USD)")
+
+
+## DV - Sales
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_exp_pct, y = net_sales, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_exp_pct, y = net_sales), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "R&D Expenditure (Out of Total Expenditure)",
+    y = "Sales (Millions USD)")
+
+
+## DV - Income
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_exp_pct, y = net_income, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_exp_pct, y = net_income), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "R&D Expenditure (Out of Total Expenditure)",
+    y = "Net Income (Millions USD)")
+
+
+## DV - ROA
+df_2021 %>%
+  drop_na() %>%
+  ggplot() + geom_point(aes(x = rd_exp_pct, y = roa, color = industry)) + 
+  facet_wrap(industry~., ncol = 2, scales = "free_x") +
+  stat_smooth(aes(x = rd_exp_pct, y = roa), method = "lm", se = FALSE, linewidth = 0.5) + 
+  labs(
+    x = "R&D Expenditure (Out of Total Expenditure)",
+    y = "ROA")
+
+```
+
+
+
